@@ -3,6 +3,7 @@ import { chatGuid } from "@photon-ai/advanced-imessage";
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { ShomiAgent } from "./agent/shomi-agent.js";
+import { buildLabelledProductGif } from "./agent/product-gif-builder.js";
 
 dotenv.config();
 
@@ -129,22 +130,12 @@ async function markSpaceAsReadWithHumanDelay(
   return delayMs;
 }
 
-function inferFileName(imageUrl: string, mimeType: string) {
-  const pathname = new URL(imageUrl).pathname;
-  const fromPath = pathname.split("/").pop()?.trim();
-
-  if (fromPath) {
-    return fromPath;
-  }
-
-  const extension = mimeType.split("/")[1] ?? "jpg";
-  return `product-image.${extension}`;
-}
-
-async function sendProductImageAndThreadedReply(
+async function sendProductGifAndThreadedReply(
   app: Awaited<ReturnType<typeof Spectrum>>,
   spaceId: string,
-  imageUrl: string,
+  gifBytes: Uint8Array,
+  fileName: string,
+  mimeType: string,
   replyText: string,
 ) {
   const remote = getRemoteIMessageClient(app);
@@ -153,17 +144,9 @@ async function sendProductImageAndThreadedReply(
     return false;
   }
 
-  const response = await fetch(imageUrl);
-
-  if (!response.ok) {
-    throw new Error(`failed to fetch product image: ${response.status} ${response.statusText}`);
-  }
-
-  const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
-  const bytes = new Uint8Array(await response.arrayBuffer());
   const attachment = await remote.attachments.upload({
-    data: bytes,
-    fileName: inferFileName(imageUrl, mimeType),
+    data: gifBytes,
+    fileName,
     mimeType,
   });
   const imageReceipt = await remote.messages.send(chatGuid(spaceId), "", {
@@ -198,29 +181,40 @@ async function handleIncomingMessage(
   let sentAttachment = false;
 
   if (response.productResults.length > 0 && response.textParts.length > 0) {
-    const firstProductWithImage = response.productResults.find(
-      (product) => typeof product.imageUrl === "string" && product.imageUrl.length > 0,
-    );
+    const frames = response.productResults
+      .filter(
+        (product): product is typeof product & { imageUrl: string } =>
+          typeof product.imageUrl === "string" && product.imageUrl.length > 0,
+      )
+      .map((product, idx) => ({
+        imageUrl: product.imageUrl,
+        index: idx + 1,
+      }));
 
-    if (firstProductWithImage?.imageUrl) {
+    if (frames.length > 0) {
       try {
-        const delayMs = await sleepForHumanReplyDelay();
-        const threaded = await sendProductImageAndThreadedReply(
-          app,
-          space.id,
-          firstProductWithImage.imageUrl,
-          response.textParts[0]!,
-        );
+        const gif = await buildLabelledProductGif(frames);
 
-        if (threaded) {
-          sentAttachment = true;
-          sentParts.push(response.textParts[0]!);
-          replyDelayMs.push(delayMs);
+        if (gif) {
+          const delayMs = await sleepForHumanReplyDelay();
+          const threaded = await sendProductGifAndThreadedReply(
+            app,
+            space.id,
+            gif.data,
+            gif.fileName,
+            gif.mimeType,
+            response.textParts[0]!,
+          );
+
+          if (threaded) {
+            sentAttachment = true;
+            sentParts.push(response.textParts[0]!);
+            replyDelayMs.push(delayMs);
+          }
         }
       } catch (error) {
-        console.error("product image send failed", {
+        console.error("product gif send failed", {
           error,
-          imageUrl: firstProductWithImage.imageUrl,
           spaceId: space.id,
         });
       }

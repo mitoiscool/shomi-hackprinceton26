@@ -188,8 +188,10 @@ export class ShomiAgent {
       userMessageText: context.messageText,
     });
     const productTools = createProductAgentTools({
+      model: this.model,
       queryEmbeddings: this.queryEmbeddings,
       store: this.memoryStore,
+      userMessageText: context.messageText,
     });
     const allActionTools = [...actionTools, ...productTools];
     const modelWithTools = this.model.bindTools(allActionTools);

@@ -20,8 +20,10 @@
     "@langchain/google-genai": "^2.1.27",
     "@photon-ai/advanced-imessage": "^0.4.3",
     "dotenv": "^16.4.5",
+    "gifenc": "^1.0.3",
     "knotapi-js": "^1.1.1",
     "langchain": "^1.3.3",
+    "sharp": "^0.34.5",
     "spectrum-ts": "^0.4.0"
   },
   "devDependencies": {
