@@ -1,3 +1,5 @@
+check out https://caius.org/
+
 gemini api project id: gen-lang-client-0104751862
 
 future ideas:
