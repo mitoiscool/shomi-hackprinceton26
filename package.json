@@ -1,0 +1,23 @@
+{
+  "name": "shomi-hackprinceton26",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node --env-file=.env dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@photon-ai/advanced-imessage": "^0.4.3",
+    "dotenv": "^16.4.5",
+    "knotapi-js": "^1.1.1",
+    "spectrum-ts": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}
