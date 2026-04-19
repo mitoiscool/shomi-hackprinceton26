@@ -2,12 +2,16 @@ import dotenv from "dotenv";
 import { chatGuid } from "@photon-ai/advanced-imessage";
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
+import { ShomiAgent } from "./agent/shomi-agent.js";
 
 dotenv.config();
 
 type AppConfig = {
+  contextCharLimit: number;
   spectrumProjectId: string;
   spectrumSecretKey: string;
+  geminiApiKey: string;
+  geminiModel: string;
   myPhoneNumber: string;
 };
 
@@ -23,9 +27,12 @@ function requireEnv(name: keyof NodeJS.ProcessEnv): string {
 
 function loadConfig(): AppConfig {
   return {
+    contextCharLimit: Number(process.env.PROMPT_CONTEXT_LIMIT ?? "100000"),
     spectrumProjectId: requireEnv("SPECTRUM_PROJECT_ID"),
     spectrumSecretKey:
       process.env.SPECTRUM_SECRET_KEY ?? requireEnv("SPECTRUM_API_KEY"),
+    geminiApiKey: requireEnv("GEMINI_API_KEY"),
+    geminiModel: process.env.GEMINI_MODEL ?? "gemini-2.5-flash",
     myPhoneNumber: requireEnv("MY_PHONE_NUMBER"),
   };
 }
@@ -47,6 +54,9 @@ function summarizeMessage(message: {
   };
 }
 
+const TOOL_FAILURE_REPLY =
+  "Caius messed something up, my tools are failing me rn. he should probably lock in";
+
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -55,24 +65,52 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function markSpaceAsRead(app: Awaited<ReturnType<typeof Spectrum>>, spaceId: string) {
+async function sleepForHumanReplyDelay() {
+  const delayMs = randomInt(500, 1000);
+  await sleep(delayMs);
+  return delayMs;
+}
+
+type RemoteIMessageClient = {
+  attachments?: {
+    upload: (input: {
+      data: Uint8Array;
+      fileName: string;
+      mimeType: string;
+    }) => Promise<{
+      guid: string;
+    }>;
+  };
+  chats?: {
+    markRead: (chat: ReturnType<typeof chatGuid>) => Promise<void>;
+  };
+  messages?: {
+    send: (
+      chat: ReturnType<typeof chatGuid>,
+      text: string,
+      options?: {
+        attachment?: string;
+        replyTo?: string;
+      },
+    ) => Promise<{
+      guid: string;
+    }>;
+  };
+};
+
+function getRemoteIMessageClient(app: Awaited<ReturnType<typeof Spectrum>>) {
   const platformEntry = app.__internal.platforms.get("iMessage");
 
   if (!platformEntry) {
-    return;
+    return undefined;
   }
 
-  const client = platformEntry.client as {
-    chats?: {
-      markRead: (chat: ReturnType<typeof chatGuid>) => Promise<void>;
-    };
-  } | Array<{
-    chats: {
-      markRead: (chat: ReturnType<typeof chatGuid>) => Promise<void>;
-    };
-  }>;
+  const client = platformEntry.client as RemoteIMessageClient | RemoteIMessageClient[];
+  return Array.isArray(client) ? client[0] : client;
+}
 
-  const remote = Array.isArray(client) ? client[0] : client;
+async function markSpaceAsRead(app: Awaited<ReturnType<typeof Spectrum>>, spaceId: string) {
+  const remote = getRemoteIMessageClient(app);
 
   if (!remote?.chats?.markRead) {
     return;
@@ -91,8 +129,134 @@ async function markSpaceAsReadWithHumanDelay(
   return delayMs;
 }
 
+function inferFileName(imageUrl: string, mimeType: string) {
+  const pathname = new URL(imageUrl).pathname;
+  const fromPath = pathname.split("/").pop()?.trim();
+
+  if (fromPath) {
+    return fromPath;
+  }
+
+  const extension = mimeType.split("/")[1] ?? "jpg";
+  return `product-image.${extension}`;
+}
+
+async function sendProductImageAndThreadedReply(
+  app: Awaited<ReturnType<typeof Spectrum>>,
+  spaceId: string,
+  imageUrl: string,
+  replyText: string,
+) {
+  const remote = getRemoteIMessageClient(app);
+
+  if (!remote?.attachments?.upload || !remote?.messages?.send) {
+    return false;
+  }
+
+  const response = await fetch(imageUrl);
+
+  if (!response.ok) {
+    throw new Error(`failed to fetch product image: ${response.status} ${response.statusText}`);
+  }
+
+  const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const attachment = await remote.attachments.upload({
+    data: bytes,
+    fileName: inferFileName(imageUrl, mimeType),
+    mimeType,
+  });
+  const imageReceipt = await remote.messages.send(chatGuid(spaceId), "", {
+    attachment: attachment.guid,
+  });
+
+  await remote.messages.send(chatGuid(spaceId), replyText, {
+    replyTo: imageReceipt.guid,
+  });
+
+  return true;
+}
+
+async function handleIncomingMessage(
+  app: Awaited<ReturnType<typeof Spectrum>>,
+  agent: ShomiAgent,
+  space: {
+    id: string;
+    send: (...content: [string, ...string[]]) => Promise<void>;
+  },
+  message: {
+    id: string;
+    sender: { id: string };
+  },
+  text: string,
+) {
+  const readPromise = markSpaceAsReadWithHumanDelay(app, space.id);
+  const response = await agent.respond(message.sender.id, text);
+  const readDelayMs = await readPromise;
+  const sentParts: string[] = [];
+  const replyDelayMs: number[] = [];
+  let sentAttachment = false;
+
+  if (response.productResults.length > 0 && response.textParts.length > 0) {
+    const firstProductWithImage = response.productResults.find(
+      (product) => typeof product.imageUrl === "string" && product.imageUrl.length > 0,
+    );
+
+    if (firstProductWithImage?.imageUrl) {
+      try {
+        const delayMs = await sleepForHumanReplyDelay();
+        const threaded = await sendProductImageAndThreadedReply(
+          app,
+          space.id,
+          firstProductWithImage.imageUrl,
+          response.textParts[0]!,
+        );
+
+        if (threaded) {
+          sentAttachment = true;
+          sentParts.push(response.textParts[0]!);
+          replyDelayMs.push(delayMs);
+        }
+      } catch (error) {
+        console.error("product image send failed", {
+          error,
+          imageUrl: firstProductWithImage.imageUrl,
+          spaceId: space.id,
+        });
+      }
+    }
+  }
+
+  const remainingParts = sentAttachment
+    ? response.textParts.slice(1)
+    : response.textParts;
+
+  for (const part of remainingParts) {
+    const delayMs = await sleepForHumanReplyDelay();
+    await space.send(part);
+    sentParts.push(part);
+    replyDelayMs.push(delayMs);
+  }
+
+  console.log("replied", {
+    spaceId: space.id,
+    messageId: message.id,
+    from: message.sender.id,
+    reply: response.rawText,
+    sentAttachment,
+    sentParts,
+    readDelayMs,
+    replyDelayMs,
+  });
+}
+
 async function main() {
   const config = loadConfig();
+  const agent = new ShomiAgent({
+    apiKey: config.geminiApiKey,
+    contextCharLimit: config.contextCharLimit,
+    model: config.geminiModel,
+  });
 
   const app = await Spectrum({
     projectId: config.spectrumProjectId,
@@ -106,6 +270,8 @@ async function main() {
       {
         spectrumProjectId: config.spectrumProjectId,
         spectrumSecretKeyConfigured: config.spectrumSecretKey.length > 0,
+        contextCharLimit: config.contextCharLimit,
+        geminiModel: config.geminiModel,
         myPhoneNumber: config.myPhoneNumber,
       },
       null,
@@ -156,18 +322,26 @@ async function main() {
       continue;
     }
 
-    try {
-      const readDelayMs = await markSpaceAsReadWithHumanDelay(app, space.id);
-
-      console.log("read", {
+    void handleIncomingMessage(app, agent, space, message, text).catch(async (error) => {
+      console.error("message handler failed", {
         spaceId: space.id,
         messageId: message.id,
         from: message.sender.id,
-        readDelayMs,
+        error,
       });
-    } catch (error) {
-      console.error("read failed", error);
-    }
+
+      try {
+        await sleepForHumanReplyDelay();
+        await space.send(TOOL_FAILURE_REPLY);
+      } catch (sendError) {
+        console.error("failed to send fallback reply", {
+          spaceId: space.id,
+          messageId: message.id,
+          from: message.sender.id,
+          error: sendError,
+        });
+      }
+    });
   }
 }
 
