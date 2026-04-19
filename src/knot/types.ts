@@ -217,6 +217,7 @@ export type StoredShoppingOperation = {
   errorMessage?: string;
   externalUserId: string;
   merchantId: number;
+  notifiedAt?: Date;
   operationId: string;
   payloadJson: string;
   resultJson?: string;

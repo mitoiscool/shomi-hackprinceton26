@@ -209,29 +209,6 @@ function operationAgeSeconds(operation?: { createdAt: Date }) {
   return Math.max(0, Math.round((Date.now() - operation.createdAt.getTime()) / 1000));
 }
 
-async function waitForOperationSettled(
-  store: KnotDemoStore,
-  externalUserId: string,
-  merchantId: number,
-  type: "sync_cart" | "checkout",
-  timeoutMs = 8000,
-  pollIntervalMs = 400,
-) {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const operation = store.getLatestOperation(externalUserId, merchantId, type);
-
-    if (operation && operation.status !== "pending") {
-      return operation;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-  }
-
-  return store.getLatestOperation(externalUserId, merchantId, type);
-}
-
 export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
   const resolveExternalUserId = async (explicitExternalUserId?: string) =>
     resolveOrSeedExternalUserId({
@@ -427,32 +404,15 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
             store: options.store,
           });
 
-          const merchantId = options.config.walmartMerchantId;
-          const settled = await waitForOperationSettled(
-            options.store,
-            initial.externalUserId,
-            merchantId,
-            "sync_cart",
-          );
-          const snapshot = options.store.getCartStatus(
-            initial.externalUserId,
-            merchantId,
-          );
-
           return {
-            ageSeconds: operationAgeSeconds(settled),
-            cart: snapshot.cart,
-            confirmationToken: snapshot.cart?.confirmationToken,
-            errorCode: settled?.errorCode,
-            errorMessage: settled?.errorMessage,
             externalUserId: initial.externalUserId,
             operationId: initial.operationId,
-            status: settled?.status ?? "pending",
+            status: "pending" as const,
           };
         }),
       {
         description:
-          "sync the walmart shopping cart using walmart product external ids and wait for the webhook to confirm. delivery info is read from the stored user profile. if the profile is missing fields this tool returns status need_delivery_info with a list of missing keys so you can ask the user. when status is succeeded the response contains a confirmationToken to use for checkout. when status is still pending after the wait the webhook has not arrived yet",
+          "kick off a walmart cart sync using walmart product external ids. returns immediately with status pending. the system will message the user directly when the cart is ready with the confirmation token so after calling this tell the user you are preparing their cart and wait for their next message. delivery info is read from the stored user profile. if the profile is missing fields this returns status need_delivery_info with a list of missing keys",
         name: "sync_cart",
         schema: z.object({
           deliveryLocation: deliveryLocationSchema.optional(),
@@ -468,22 +428,10 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
       },
     ),
     tool(
-      async (input) =>
+      async () =>
         runToolSafely(async () => {
           const externalUserId = await resolveExternalUserId();
           const merchantId = options.config.walmartMerchantId;
-          const waitMs = Math.max(0, Math.min(30, input.waitSeconds ?? 0)) * 1000;
-
-          if (waitMs > 0) {
-            await waitForOperationSettled(
-              options.store,
-              externalUserId,
-              merchantId,
-              "sync_cart",
-              waitMs,
-            );
-          }
-
           const snapshot = options.store.getCartStatus(externalUserId, merchantId);
 
           return {
@@ -493,15 +441,14 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
             externalUserId,
             operation: snapshot.operation,
             status: snapshot.operation?.status ?? "none",
+            userAlreadyNotified: snapshot.operation?.notifiedAt != null,
           };
         }),
       {
         description:
-          "get the latest walmart cart status and confirmation token. status is pending succeeded failed or none. pass waitSeconds up to 30 to poll for that long waiting for a pending cart to settle. use waitSeconds 15 when the user asks check again",
+          "get the latest walmart cart snapshot. status is pending succeeded failed or none. userAlreadyNotified is true when the system has already messaged the user about this cart. if userAlreadyNotified is true do not repeat the status or confirmation token unless the user explicitly asks for it",
         name: "get_cart_status",
-        schema: z.object({
-          waitSeconds: z.number().int().min(0).max(30).optional(),
-        }),
+        schema: z.object({}),
       },
     ),
     tool(
@@ -527,32 +474,15 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
             userMessageText: options.userMessageText,
           });
 
-          const merchantId = options.config.walmartMerchantId;
-          const settled = await waitForOperationSettled(
-            options.store,
-            initial.externalUserId,
-            merchantId,
-            "checkout",
-          );
-          const snapshot = options.store.getCheckoutStatus(
-            initial.externalUserId,
-            merchantId,
-          );
-
           return {
-            ageSeconds: operationAgeSeconds(settled),
-            errorCode: settled?.errorCode,
-            errorMessage: settled?.errorMessage,
             externalUserId: initial.externalUserId,
             operationId: initial.operationId,
-            result: snapshot.result,
-            status: settled?.status ?? "pending",
-            transactionIds: snapshot.result?.transactionIds ?? [],
+            status: "pending" as const,
           };
         }),
       {
         description:
-          "checkout a merchant cart after the user explicitly confirms. the user message must contain the literal word confirm. pass the confirmationToken from sync_cart or get_cart_status. this waits for the webhook so a succeeded status means the order is really placed",
+          "kick off a walmart checkout after the user explicitly confirms. the user message must contain the literal word confirm. pass the confirmationToken from get_cart_status. returns immediately with status pending. the system will message the user directly when the order completes so after calling this tell the user you are placing their order and wait for their next message",
         name: "checkout_cart",
         schema: z.object({
           appOwnedPaymentMethod: z
@@ -568,22 +498,10 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
       },
     ),
     tool(
-      async (input) =>
+      async () =>
         runToolSafely(async () => {
           const externalUserId = await resolveExternalUserId();
           const merchantId = options.config.walmartMerchantId;
-          const waitMs = Math.max(0, Math.min(30, input.waitSeconds ?? 0)) * 1000;
-
-          if (waitMs > 0) {
-            await waitForOperationSettled(
-              options.store,
-              externalUserId,
-              merchantId,
-              "checkout",
-              waitMs,
-            );
-          }
-
           const snapshot = options.store.getCheckoutStatus(externalUserId, merchantId);
 
           return {
@@ -593,15 +511,14 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
             result: snapshot.result,
             status: snapshot.operation?.status ?? "none",
             transactionIds: snapshot.result?.transactionIds ?? [],
+            userAlreadyNotified: snapshot.operation?.notifiedAt != null,
           };
         }),
       {
         description:
-          "get the latest walmart checkout status. status is pending succeeded failed or none. pass waitSeconds up to 30 to poll for that long waiting for a pending checkout to settle",
+          "get the latest walmart checkout snapshot. status is pending succeeded failed or none. userAlreadyNotified is true when the system has already messaged the user about this checkout. if userAlreadyNotified is true do not repeat the status unless the user explicitly asks for it",
         name: "get_checkout_status",
-        schema: z.object({
-          waitSeconds: z.number().int().min(0).max(30).optional(),
-        }),
+        schema: z.object({}),
       },
     ),
     tool(
@@ -623,10 +540,10 @@ export function createKnotAgentTools(options: CreateKnotAgentToolsOptions) {
             })),
             hint:
               events.length === 0
-                ? "no webhooks have been received. the webhook listener is up at port 8787 path /webhooks/knot but either ngrok is not tunneling to it or the knot dashboard webhook url is wrong. tell the user we have not received any webhooks from knot yet"
+                ? "internal note for the agent only do not share with the user. no events received yet. apologize briefly and tell the user things are taking a bit longer than usual. never explain the internals"
                 : secondsSinceLast !== undefined && secondsSinceLast > 60
-                  ? "no recent webhooks in the last minute. if a cart or checkout is stuck pending the webhook delivery is likely broken"
-                  : "webhooks are flowing",
+                  ? "internal note for the agent only do not share with the user. no recent events. apologize briefly and tell the user things are taking longer than usual never explain the internals"
+                  : "internal note for the agent only do not share with the user. events are flowing keep going",
             secondsSinceLast,
             totalRecent: events.length,
           };

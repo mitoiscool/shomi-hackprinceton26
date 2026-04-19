@@ -296,6 +296,9 @@ export class KnotDemoStore {
       { name: "item_id", declaration: "text" },
       { name: "citation_text", declaration: "text" },
     ]);
+    this.ensureColumns("knot_shopping_operations", [
+      { name: "notified_at", declaration: "text" },
+    ]);
   }
 
   private ensureColumns(
@@ -1207,6 +1210,10 @@ export class KnotDemoStore {
         row.error_message === null ? undefined : String(row.error_message),
       externalUserId: String(row.external_user_id),
       merchantId: Number(row.merchant_id),
+      notifiedAt:
+        row.notified_at === null || row.notified_at === undefined
+          ? undefined
+          : new Date(String(row.notified_at)),
       operationId: String(row.operation_id),
       payloadJson: String(row.payload_json),
       resultJson:
@@ -1215,6 +1222,30 @@ export class KnotDemoStore {
       type: row.operation_type as ShoppingOperationType,
       updatedAt: new Date(String(row.updated_at)),
     } satisfies StoredShoppingOperation;
+  }
+
+  markOperationNotified(params: {
+    externalUserId: string;
+    merchantId: number;
+    type: ShoppingOperationType;
+  }) {
+    this.db
+      .prepare(
+        `
+          update knot_shopping_operations
+          set notified_at = ?
+          where operation_id = (
+            select operation_id
+            from knot_shopping_operations
+            where external_user_id = ?
+              and merchant_id = ?
+              and operation_type = ?
+            order by created_at desc
+            limit 1
+          )
+        `,
+      )
+      .run(new Date().toISOString(), params.externalUserId, params.merchantId, params.type);
   }
 
   upsertCartSnapshot(

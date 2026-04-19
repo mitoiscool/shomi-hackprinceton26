@@ -61,6 +61,8 @@ async function notifyIfPossible(
   store: KnotDemoStore,
   event: KnotWebhookPayload["event"],
   externalUserId: string,
+  merchantId: number,
+  markOperationType: "sync_cart" | "checkout" | undefined,
   message: string,
 ) {
   if (!notifyUser) {
@@ -75,6 +77,13 @@ async function notifyIfPossible(
 
   try {
     await notifyUser({ appUserId, event, externalUserId, message });
+    if (markOperationType) {
+      store.markOperationNotified({
+        externalUserId,
+        merchantId,
+        type: markOperationType,
+      });
+    }
   } catch (error) {
     console.error("knot webhook notifyUser failed", {
       error: error instanceof Error ? error.message : String(error),
@@ -155,6 +164,8 @@ export async function processKnotWebhook(params: {
         params.store,
         params.payload.event,
         externalUserId,
+        merchantId,
+        "sync_cart",
         `your walmart cart is ready<textbreak>reply confirm ${confirmationToken} to place the order`,
       );
       break;
@@ -182,6 +193,8 @@ export async function processKnotWebhook(params: {
         params.store,
         params.payload.event,
         externalUserId,
+        merchantId,
+        "sync_cart",
         errorMessage
           ? `walmart cart sync failed<textbreak>${errorMessage}`
           : "walmart cart sync failed",
@@ -225,6 +238,8 @@ export async function processKnotWebhook(params: {
         params.store,
         params.payload.event,
         externalUserId,
+        merchantId,
+        "checkout",
         transactionIds.length > 0
           ? `walmart order placed<textbreak>${transactionIds.length} transaction${
               transactionIds.length === 1 ? "" : "s"
@@ -265,6 +280,8 @@ export async function processKnotWebhook(params: {
         params.store,
         params.payload.event,
         externalUserId,
+        merchantId,
+        "checkout",
         errorMessage
           ? `walmart checkout failed<textbreak>${errorMessage}`
           : "walmart checkout failed",
@@ -284,6 +301,21 @@ export function startKnotWebhookServer(params: {
   store: KnotDemoStore;
 }) {
   const server = createServer(async (request, response) => {
+    if (request.method === "GET" && request.url === params.config.webhookPath) {
+      response.statusCode = 200;
+      response.setHeader("Content-Type", "application/json");
+      response.end(
+        JSON.stringify({
+          env: params.config.environment,
+          message:
+            "knot webhook listener is up. configure this URL as a POST webhook in the knot dashboard for this environment",
+          path: params.config.webhookPath,
+          status: "ok",
+        }),
+      );
+      return;
+    }
+
     if (request.method !== "POST" || request.url !== params.config.webhookPath) {
       console.log("[knot-webhook] 404", {
         method: request.method,
@@ -340,9 +372,56 @@ export function startKnotWebhookServer(params: {
   });
 
   server.listen(params.config.webhookPort, () => {
-    console.log(
-      `[knot-webhook] listening on http://0.0.0.0:${params.config.webhookPort}${params.config.webhookPath}`,
-    );
+    const localUrl = `http://localhost:${params.config.webhookPort}${params.config.webhookPath}`;
+    console.log("[knot-webhook] listening", {
+      env: params.config.environment,
+      localUrl,
+    });
+
+    void detectPublicWebhookUrl(params.config.webhookPort).then((publicUrl) => {
+      const resolved =
+        process.env.KNOT_WEBHOOK_PUBLIC_URL ??
+        (publicUrl ? `${publicUrl}${params.config.webhookPath}` : undefined);
+
+      if (resolved) {
+        console.log(
+          `[knot-webhook] register this URL in the knot ${params.config.environment} dashboard: ${resolved}`,
+        );
+      } else {
+        console.log(
+          "[knot-webhook] no ngrok tunnel detected on :4040 and KNOT_WEBHOOK_PUBLIC_URL not set. run `./ngrok http 8787` and register the https URL with path /webhooks/knot in the knot dashboard for this environment",
+        );
+      }
+    });
   });
   return server;
+}
+
+async function detectPublicWebhookUrl(localPort: number) {
+  try {
+    const response = await fetch("http://127.0.0.1:4040/api/tunnels", {
+      signal: AbortSignal.timeout(1000),
+    });
+
+    if (!response.ok) return undefined;
+
+    const body = (await response.json()) as {
+      tunnels?: Array<{
+        config?: { addr?: string };
+        proto?: string;
+        public_url?: string;
+      }>;
+    };
+
+    const match = body.tunnels?.find(
+      (tunnel) =>
+        tunnel.proto === "https" &&
+        typeof tunnel.config?.addr === "string" &&
+        tunnel.config.addr.endsWith(`:${localPort}`),
+    );
+
+    return match?.public_url;
+  } catch {
+    return undefined;
+  }
 }
