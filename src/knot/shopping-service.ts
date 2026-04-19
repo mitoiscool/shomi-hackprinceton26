@@ -24,6 +24,7 @@ export async function seedDevUser(params: {
 }) {
   const externalUserId =
     params.externalUserId ??
+    params.store.resolveExternalUserId(params.appUserId) ??
     params.config.defaultExternalUserId ??
     generateDevExternalUserId();
   const merchantId = params.config.walmartMerchantId;

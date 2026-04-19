@@ -55,9 +55,6 @@ function summarizeMessage(message: {
   };
 }
 
-const TOOL_FAILURE_REPLY =
-  "Caius messed something up, my tools are failing me rn. he should probably lock in";
-
 function randomInt(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
@@ -174,11 +171,19 @@ async function handleIncomingMessage(
   text: string,
 ) {
   const readPromise = markSpaceAsReadWithHumanDelay(app, space.id);
-  const response = await agent.respond(message.sender.id, text);
-  const readDelayMs = await readPromise;
   const sentParts: string[] = [];
   const replyDelayMs: number[] = [];
   let sentAttachment = false;
+
+  const response = await agent.respond(message.sender.id, text, async (parts) => {
+    for (const part of parts) {
+      const delayMs = await sleepForHumanReplyDelay();
+      await space.send(part);
+      sentParts.push(part);
+      replyDelayMs.push(delayMs);
+    }
+  });
+  const readDelayMs = await readPromise;
 
   if (response.productResults.length > 0 && response.textParts.length > 0) {
     const frames = response.productResults
@@ -273,31 +278,42 @@ async function main() {
     ),
   );
 
+  const im = imessage(app);
+
+  const webhookServer = agent.startKnotWebhookServer(async ({ appUserId, event, message }) => {
+    try {
+      const recipient = await im.user(appUserId);
+      const space = await im.space(recipient);
+      for (const part of message.split("<textbreak>").map((p) => p.trim()).filter(Boolean)) {
+        await space.send(part);
+      }
+    } catch (error) {
+      console.error("knot webhook notify failed", {
+        appUserId,
+        error: error instanceof Error ? error.message : String(error),
+        event,
+      });
+    }
+  });
+
+  console.log("knot webhook listener started");
+
   try {
-    const im = imessage(app);
     const me = await im.user(config.myPhoneNumber);
     const mySpace = await im.space(me);
-
-    await mySpace.send("started");
-    console.log("sent startup message", {
-      to: config.myPhoneNumber,
-      message: "started",
-    });
   } catch (error) {
     console.error("startup send failed", error);
   }
 
-  process.on("SIGINT", async () => {
+  const shutdown = async () => {
     console.log("Shutting down Spectrum client...");
+    webhookServer.close();
     await app.stop();
     process.exit(0);
-  });
+  };
 
-  process.on("SIGTERM", async () => {
-    console.log("Shutting down Spectrum client...");
-    await app.stop();
-    process.exit(0);
-  });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 
   for await (const [space, message] of app.messages) {
     console.log("[message]", summarizeMessage(message));
@@ -326,7 +342,7 @@ async function main() {
 
       try {
         await sleepForHumanReplyDelay();
-        await space.send(TOOL_FAILURE_REPLY);
+        await space.send("sorry, something went wrong. please try again later.");
       } catch (sendError) {
         console.error("failed to send fallback reply", {
           spaceId: space.id,

@@ -106,11 +106,25 @@ function getImageUrl(product: WalmartProduct) {
   );
 }
 
+function resolveDefaultFilename() {
+  const candidates = [
+    path.join(process.cwd(), "data", "walmartdatav3large.json"),
+  ];
+
+  const existing = candidates.find((candidate) => fs.existsSync(candidate));
+
+  if (!existing) {
+    throw new Error(
+      `Could not find a Walmart dataset. Checked: ${candidates.join(", ")}`,
+    );
+  }
+
+  return existing;
+}
+
 async function main() {
   const apiKey = getRequiredEnv("GEMINI_API_KEY");
-  const filename =
-    process.argv[2] ??
-    path.join(process.cwd(), "data", "dataset_walmart-scraper_2026-04-19_05-54-43-757.json");
+  const filename = process.argv[2] ?? resolveDefaultFilename();
   const raw = fs.readFileSync(filename, "utf8");
   const parsed = JSON.parse(raw);
 

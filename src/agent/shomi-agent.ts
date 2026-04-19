@@ -1,4 +1,4 @@
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
 import { ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
 import { TaskType } from "@google/generative-ai";
@@ -6,6 +6,10 @@ import { SHOMI_PERSONALITY } from "../shomi-personality.js";
 import { loadKnotConfig } from "../knot/config.js";
 import { KnotClient } from "../knot/client.js";
 import { KnotDemoStore } from "../knot/store.js";
+import {
+  startKnotWebhookServer,
+  type KnotWebhookNotifier,
+} from "../knot/webhooks.js";
 import { SqliteMemoryStore } from "../memory/sqlite-memory-store.js";
 import type { MemoryStore } from "../memory/types.js";
 import type { AgentRunContext, AgentTool } from "./tools.js";
@@ -178,10 +182,14 @@ export class ShomiAgent {
     return buildMessages();
   }
 
-  private async invokeWithActionTools(context: AgentRunContext) {
+  private async invokeWithActionTools(
+    context: AgentRunContext,
+    onInterimReply?: (parts: string[]) => Promise<void> | void,
+  ) {
     const actionTools = createKnotAgentTools({
       client: this.knotClient,
       config: loadKnotConfig(),
+      memoryStore: this.memoryStore,
       queryEmbeddings: this.queryEmbeddings,
       store: this.knotStore,
       userId: context.userId,
@@ -211,11 +219,33 @@ export class ShomiAgent {
         };
       }
 
+      const interimText = response.text.trim();
+
+      if (interimText.length > 0 && onInterimReply) {
+        const parts = splitTextMessages(interimText);
+
+        if (parts.length > 0) {
+          await onInterimReply(parts);
+        }
+      }
+
       for (const toolCall of toolCalls) {
         const matchingTool = allActionTools.find((tool) => tool.name === toolCall.name);
 
+        const toolCallId = toolCall.id ?? `${toolCall.name}-${iteration}`;
+
         if (!matchingTool) {
-          throw new Error(`Unknown action tool requested: ${toolCall.name}`);
+          messages.push(
+            new ToolMessage({
+              content: JSON.stringify({
+                error: `unknown tool ${toolCall.name}`,
+                status: "error",
+              }),
+              name: toolCall.name,
+              tool_call_id: toolCallId,
+            }),
+          );
+          continue;
         }
 
         console.log("[tool-call]", {
@@ -223,11 +253,26 @@ export class ShomiAgent {
           name: toolCall.name,
         });
 
-        const toolResult = await (
-          matchingTool as {
-            invoke: (input: unknown) => Promise<BaseMessage>;
-          }
-        ).invoke(toolCall);
+        let toolResult: BaseMessage;
+
+        try {
+          toolResult = await (
+            matchingTool as {
+              invoke: (input: unknown) => Promise<BaseMessage>;
+            }
+          ).invoke(toolCall);
+        } catch (error) {
+          const errorText = error instanceof Error ? error.message : String(error);
+          console.error("[tool-error]", {
+            error: truncateForLog(errorText, 400),
+            name: toolCall.name,
+          });
+          toolResult = new ToolMessage({
+            content: JSON.stringify({ error: errorText, status: "error" }),
+            name: toolCall.name,
+            tool_call_id: toolCallId,
+          });
+        }
 
         console.log("[tool-response]", {
           name: toolCall.name,
@@ -268,7 +313,22 @@ export class ShomiAgent {
     throw new Error("shomi exceeded the maximum tool iterations");
   }
 
-  async respond(userId: string, messageText: string): Promise<AgentResponse> {
+  startKnotWebhookServer(notifyUser?: KnotWebhookNotifier) {
+    const config = loadKnotConfig();
+
+    return startKnotWebhookServer({
+      client: this.knotClient,
+      config,
+      notifyUser,
+      store: this.knotStore,
+    });
+  }
+
+  async respond(
+    userId: string,
+    messageText: string,
+    onInterimReply?: (parts: string[]) => Promise<void> | void,
+  ): Promise<AgentResponse> {
     const context: AgentRunContext = {
       chatHistory: [],
       messageText,
@@ -280,7 +340,7 @@ export class ShomiAgent {
       await tool.beforeModel(context);
     }
 
-    const result = await this.invokeWithActionTools(context);
+    const result = await this.invokeWithActionTools(context, onInterimReply);
     const rawText = typeof result === "string" ? result : result.rawText;
     const productResults =
       typeof result === "string" ? [] : (result.productResults ?? []);

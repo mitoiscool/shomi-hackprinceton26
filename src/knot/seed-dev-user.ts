@@ -22,7 +22,8 @@ async function main() {
   const store = new KnotDemoStore({
     filename: config.sqlitePath,
   });
-  const appUserId = parseArgValue("--app-user-id") ?? "local-cli";
+  const appUserId =
+    parseArgValue("--app-user-id") ?? process.env.MY_PHONE_NUMBER ?? "local-cli";
   const externalUserId = parseArgValue("--external-user-id");
   const result = await seedDevUser({
     appUserId,
@@ -32,7 +33,16 @@ async function main() {
     store,
   });
 
-  console.log(JSON.stringify(result, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        appUserId,
+        ...result,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 main().catch((error) => {

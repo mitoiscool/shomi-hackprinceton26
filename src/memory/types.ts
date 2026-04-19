@@ -6,7 +6,16 @@ export type BasicInfoKey =
   | "budget"
   | "size"
   | "brand_preference"
-  | "style_preference";
+  | "style_preference"
+  | "first_name"
+  | "last_name"
+  | "phone"
+  | "address_line1"
+  | "address_line2"
+  | "address_city"
+  | "address_region"
+  | "address_postal_code"
+  | "address_country";
 
 export type StoredConversationMessage = {
   id: string;

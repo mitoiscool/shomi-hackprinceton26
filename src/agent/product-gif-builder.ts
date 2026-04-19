@@ -21,10 +21,10 @@ const FRAME_DELAY_MS = 1500;
 const FETCH_TIMEOUT_MS = 5_000;
 
 function makeLabelSvg(index: number) {
-  const text = `${index})`;
+  const text = `${index}`;
   const padX = 18;
   const padY = 18;
-  const boxW = 92;
+  const boxW = 60;
   const boxH = 60;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${FRAME_SIZE}" height="${FRAME_SIZE}">

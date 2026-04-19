@@ -290,6 +290,32 @@ export class KnotDemoStore {
         received_at text not null
       );
     `);
+
+    this.ensureColumns("knot_purchase_embeddings", [
+      { name: "transaction_id", declaration: "text" },
+      { name: "item_id", declaration: "text" },
+      { name: "citation_text", declaration: "text" },
+    ]);
+  }
+
+  private ensureColumns(
+    tableName: string,
+    columns: Array<{ declaration: string; name: string }>,
+  ) {
+    const existing = this.db
+      .prepare(`pragma table_info(${tableName})`)
+      .all() as Array<{ name: string }>;
+    const existingNames = new Set(existing.map((row) => row.name));
+
+    for (const column of columns) {
+      if (existingNames.has(column.name)) {
+        continue;
+      }
+
+      this.db.exec(
+        `alter table ${tableName} add column ${column.name} ${column.declaration}`,
+      );
+    }
   }
 
   resolveExternalUserId(appUserId: string, explicitExternalUserId?: string) {
@@ -310,6 +336,22 @@ export class KnotDemoStore {
       .get(appUserId) as { external_user_id: string } | undefined;
 
     return row?.external_user_id;
+  }
+
+  getAppUserIdForExternalUserId(externalUserId: string) {
+    const row = this.db
+      .prepare(
+        `
+          select app_user_id
+          from knot_dev_users
+          where external_user_id = ?
+          order by updated_at desc
+          limit 1
+        `,
+      )
+      .get(externalUserId) as { app_user_id: string } | undefined;
+
+    return row?.app_user_id;
   }
 
   upsertDevUser(params: {
@@ -1466,6 +1508,31 @@ export class KnotDemoStore {
         JSON.stringify(params.payload),
         new Date().toISOString(),
       );
+  }
+
+  getRecentWebhookEvents(limit = 10) {
+    const rows = this.db
+      .prepare(
+        `
+          select event, external_user_id, merchant_id, received_at
+          from knot_webhook_events
+          order by received_at desc
+          limit ?
+        `,
+      )
+      .all(limit) as Array<{
+        event: string;
+        external_user_id: string | null;
+        merchant_id: number | null;
+        received_at: string;
+      }>;
+
+    return rows.map((row) => ({
+      event: row.event,
+      externalUserId: row.external_user_id ?? undefined,
+      merchantId: row.merchant_id ?? undefined,
+      receivedAt: new Date(row.received_at),
+    }));
   }
 }
 

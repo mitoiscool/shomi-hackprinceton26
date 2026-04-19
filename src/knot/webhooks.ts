@@ -49,15 +49,58 @@ function parseTransactionIds(payload: KnotWebhookPayload) {
     .filter((id): id is string => typeof id === "string" && id.length > 0);
 }
 
+export type KnotWebhookNotifier = (params: {
+  appUserId: string;
+  event: KnotWebhookPayload["event"];
+  externalUserId: string;
+  message: string;
+}) => Promise<void> | void;
+
+async function notifyIfPossible(
+  notifyUser: KnotWebhookNotifier | undefined,
+  store: KnotDemoStore,
+  event: KnotWebhookPayload["event"],
+  externalUserId: string,
+  message: string,
+) {
+  if (!notifyUser) {
+    return;
+  }
+
+  const appUserId = store.getAppUserIdForExternalUserId(externalUserId);
+
+  if (!appUserId) {
+    return;
+  }
+
+  try {
+    await notifyUser({ appUserId, event, externalUserId, message });
+  } catch (error) {
+    console.error("knot webhook notifyUser failed", {
+      error: error instanceof Error ? error.message : String(error),
+      event,
+      externalUserId,
+    });
+  }
+}
+
 export async function processKnotWebhook(params: {
   client: KnotClient;
   config: KnotConfig;
   embedTexts?: EmbedTextsFn;
+  notifyUser?: KnotWebhookNotifier;
   payload: KnotWebhookPayload;
   store: KnotDemoStore;
 }) {
   const externalUserId = params.payload.external_user_id;
   const merchantId = params.payload.merchant?.id;
+
+  console.log("[knot-webhook]", {
+    event: params.payload.event,
+    externalUserId,
+    merchantId,
+    sessionId: params.payload.session_id,
+  });
 
   params.store.recordWebhookEvent({
     event: params.payload.event,
@@ -107,25 +150,44 @@ export async function processKnotWebhook(params: {
         status: "succeeded",
         type: "sync_cart",
       });
+      await notifyIfPossible(
+        params.notifyUser,
+        params.store,
+        params.payload.event,
+        externalUserId,
+        `your walmart cart is ready<textbreak>reply confirm ${confirmationToken} to place the order`,
+      );
       break;
     }
-    case "SYNC_CART_FAILED":
+    case "SYNC_CART_FAILED": {
+      const errorMessage =
+        typeof params.payload.error_message === "string"
+          ? params.payload.error_message
+          : undefined;
+
       params.store.updateLatestPendingOperation({
         errorCode:
           typeof params.payload.error_code === "string"
             ? params.payload.error_code
             : undefined,
-        errorMessage:
-          typeof params.payload.error_message === "string"
-            ? params.payload.error_message
-            : undefined,
+        errorMessage,
         externalUserId,
         merchantId,
         result: params.payload,
         status: "failed",
         type: "sync_cart",
       });
+      await notifyIfPossible(
+        params.notifyUser,
+        params.store,
+        params.payload.event,
+        externalUserId,
+        errorMessage
+          ? `walmart cart sync failed<textbreak>${errorMessage}`
+          : "walmart cart sync failed",
+      );
       break;
+    }
     case "CHECKOUT_SUCCEEDED": {
       const operationId =
         params.store.updateLatestPendingOperation({
@@ -157,19 +219,32 @@ export async function processKnotWebhook(params: {
           transactionIds,
         });
       }
+
+      await notifyIfPossible(
+        params.notifyUser,
+        params.store,
+        params.payload.event,
+        externalUserId,
+        transactionIds.length > 0
+          ? `walmart order placed<textbreak>${transactionIds.length} transaction${
+              transactionIds.length === 1 ? "" : "s"
+            } recorded`
+          : "walmart order placed",
+      );
       break;
     }
     case "CHECKOUT_FAILED": {
+      const errorMessage =
+        typeof params.payload.error_message === "string"
+          ? params.payload.error_message
+          : undefined;
       const operationId =
         params.store.updateLatestPendingOperation({
           errorCode:
             typeof params.payload.error_code === "string"
               ? params.payload.error_code
               : undefined,
-          errorMessage:
-            typeof params.payload.error_message === "string"
-              ? params.payload.error_message
-              : undefined,
+          errorMessage,
           externalUserId,
           merchantId,
           result: params.payload,
@@ -185,6 +260,15 @@ export async function processKnotWebhook(params: {
         status: "failed",
         transactionIds: [],
       });
+      await notifyIfPossible(
+        params.notifyUser,
+        params.store,
+        params.payload.event,
+        externalUserId,
+        errorMessage
+          ? `walmart checkout failed<textbreak>${errorMessage}`
+          : "walmart checkout failed",
+      );
       break;
     }
     default:
@@ -196,10 +280,15 @@ export function startKnotWebhookServer(params: {
   client: KnotClient;
   config: KnotConfig;
   embedTexts?: EmbedTextsFn;
+  notifyUser?: KnotWebhookNotifier;
   store: KnotDemoStore;
 }) {
   const server = createServer(async (request, response) => {
     if (request.method !== "POST" || request.url !== params.config.webhookPath) {
+      console.log("[knot-webhook] 404", {
+        method: request.method,
+        url: request.url,
+      });
       response.statusCode = 404;
       response.end("not found");
       return;
@@ -235,6 +324,7 @@ export function startKnotWebhookServer(params: {
           client: params.client,
           config: params.config,
           embedTexts: params.embedTexts,
+          notifyUser: params.notifyUser,
           payload,
           store: params.store,
         });
@@ -249,6 +339,10 @@ export function startKnotWebhookServer(params: {
     });
   });
 
-  server.listen(params.config.webhookPort);
+  server.listen(params.config.webhookPort, () => {
+    console.log(
+      `[knot-webhook] listening on http://0.0.0.0:${params.config.webhookPort}${params.config.webhookPath}`,
+    );
+  });
   return server;
 }
